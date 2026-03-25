@@ -32,7 +32,7 @@ def extract(spark: SparkSession, csv_path: str) -> DataFrame:
 def transform(df: DataFrame, output_dir: str) -> dict[str, DataFrame]:
     """
     Transform step:
-    Split the data by neighborhood and save each neighborhood as a separate CSV.
+    Split the data by neighborhood and save each neighborhood as a separate CSV file.
 
     Returns:
         A dictionary where:
@@ -41,7 +41,6 @@ def transform(df: DataFrame, output_dir: str) -> dict[str, DataFrame]:
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Adjust this if your dataset uses a different capitalization
     possible_cols = ["neighborhood", "Neighborhood", "NEIGHBORHOOD"]
     neighborhood_col = next((c for c in possible_cols if c in df.columns), None)
 
@@ -50,7 +49,6 @@ def transform(df: DataFrame, output_dir: str) -> dict[str, DataFrame]:
             f"Could not find a neighborhood column. Available columns: {df.columns}"
         )
 
-    # Remove null neighborhoods
     df = df.filter(F.col(neighborhood_col).isNotNull())
 
     neighborhoods = [
@@ -62,23 +60,42 @@ def transform(df: DataFrame, output_dir: str) -> dict[str, DataFrame]:
 
     for neighborhood in neighborhoods:
         safe_name = re.sub(
-            r"[^a-zA-Z0-9_]", "_", str(neighborhood).strip().lower().replace(" ", "_")
+            r"[^a-zA-Z0-9_]",
+            "_",
+            str(neighborhood).strip().lower().replace(" ", "_"),
         )
 
         neighborhood_df = df.filter(F.col(neighborhood_col) == neighborhood)
-
-        # Save neighborhood data as CSV
-        output_path = str(Path(output_dir) / safe_name)
-        (
-            neighborhood_df.write.mode("overwrite")
-            .option("header", True)
-            .csv(output_path)
-        )
-
         neighborhood_dfs[safe_name] = neighborhood_df
 
-    return neighborhood_dfs
+        temp_dir = os.path.join(output_dir, f"_{safe_name}_tmp")
+        final_csv = os.path.join(output_dir, f"{safe_name}.csv")
 
+        # Write one Spark part file
+        (
+            neighborhood_df.coalesce(1)
+            .write.mode("overwrite")
+            .option("header", True)
+            .csv(temp_dir)
+        )
+
+        # Find the generated part file and rename it
+        for file_name in os.listdir(temp_dir):
+            if file_name.startswith("part-") and file_name.endswith(".csv"):
+                os.replace(
+                    os.path.join(temp_dir, file_name),
+                    final_csv,
+                )
+                break
+
+        # Remove Spark metadata/temp files
+        for file_name in os.listdir(temp_dir):
+            file_path = os.path.join(temp_dir, file_name)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+        os.rmdir(temp_dir)
+
+    return neighborhood_dfs
 
 def load(
     neighborhood_dfs: dict[str, DataFrame],
@@ -110,7 +127,7 @@ def main() -> None:
     db_password = os.getenv("DB_PASSWORD", "")
 
     csv_path = "dataset/historical_purchases.csv"
-    output_dir = "output/neighborhood_csvs"
+    output_dir = "output/by_neighborhood"
 
     spark = (
         SparkSession.builder.appName("HouseSaleETLPipeline")
