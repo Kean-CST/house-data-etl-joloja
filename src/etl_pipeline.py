@@ -25,19 +25,18 @@ def extract(spark: SparkSession, csv_path: str) -> DataFrame:
     Extract step:
     Load the CSV file into a PySpark DataFrame.
     """
-    df = spark.read.option("header", True).option("inferSchema", True).csv(csv_path)
+    df = spark.read.option("header", True).csv(csv_path)
     return df
 
 
 def transform(df: DataFrame, output_dir: str) -> dict[str, DataFrame]:
     """
     Transform step:
-    Split the data by neighborhood and save each neighborhood as a separate CSV file.
+    Split the data by neighborhood and save each neighborhood as its own
+    single CSV file in output/by_neighborhood.
 
     Returns:
-        A dictionary where:
-          key   = cleaned neighborhood name
-          value = filtered DataFrame for that neighborhood
+        A dictionary mapping cleaned neighborhood names to DataFrames.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -51,10 +50,10 @@ def transform(df: DataFrame, output_dir: str) -> dict[str, DataFrame]:
 
     df = df.filter(F.col(neighborhood_col).isNotNull())
 
-    neighborhoods = [
+    neighborhoods = sorted(
         row[neighborhood_col]
         for row in df.select(neighborhood_col).distinct().collect()
-    ]
+    )
 
     neighborhood_dfs: dict[str, DataFrame] = {}
 
@@ -65,13 +64,37 @@ def transform(df: DataFrame, output_dir: str) -> dict[str, DataFrame]:
             str(neighborhood).strip().lower().replace(" ", "_"),
         )
 
-        neighborhood_df = df.filter(F.col(neighborhood_col) == neighborhood)
+        neighborhood_df = df.filter(F.col(neighborhood_col) == neighborhood).orderBy(
+            "house_id"
+        )
+
+        # Force all columns to string so output matches expected CSV format
+        for col_name in neighborhood_df.columns:
+            neighborhood_df = neighborhood_df.withColumn(
+                col_name, F.col(col_name).cast("string")
+            )
+
+        # Fix uppercase boolean strings from Spark
+        for col_name in neighborhood_df.columns:
+            neighborhood_df = neighborhood_df.withColumn(
+                col_name,
+                F.when(F.col(col_name) == "TRUE", "True")
+                .when(F.col(col_name) == "FALSE", "False")
+                .otherwise(F.col(col_name)),
+            )
+
+        # Fix sale_date format to YYYY-MM-DD
+        if "sale_date" in neighborhood_df.columns:
+            neighborhood_df = neighborhood_df.withColumn(
+                "sale_date",
+                F.date_format(F.to_date("sale_date", "M/d/yy"), "yyyy-MM-dd"),
+            )
+
         neighborhood_dfs[safe_name] = neighborhood_df
 
         temp_dir = os.path.join(output_dir, f"_{safe_name}_tmp")
         final_csv = os.path.join(output_dir, f"{safe_name}.csv")
 
-        # Write one Spark part file
         (
             neighborhood_df.coalesce(1)
             .write.mode("overwrite")
@@ -79,16 +102,20 @@ def transform(df: DataFrame, output_dir: str) -> dict[str, DataFrame]:
             .csv(temp_dir)
         )
 
-        # Find the generated part file and rename it
+        part_file = None
         for file_name in os.listdir(temp_dir):
             if file_name.startswith("part-") and file_name.endswith(".csv"):
-                os.replace(
-                    os.path.join(temp_dir, file_name),
-                    final_csv,
-                )
+                part_file = os.path.join(temp_dir, file_name)
                 break
 
-        # Remove Spark metadata/temp files
+        if part_file is None:
+            raise FileNotFoundError(f"No CSV part file found in {temp_dir}")
+
+        if os.path.exists(final_csv):
+            os.remove(final_csv)
+
+        os.replace(part_file, final_csv)
+
         for file_name in os.listdir(temp_dir):
             file_path = os.path.join(temp_dir, file_name)
             if os.path.isfile(file_path):
@@ -96,6 +123,7 @@ def transform(df: DataFrame, output_dir: str) -> dict[str, DataFrame]:
         os.rmdir(temp_dir)
 
     return neighborhood_dfs
+
 
 def load(
     neighborhood_dfs: dict[str, DataFrame],
@@ -107,13 +135,11 @@ def load(
     Insert each neighborhood DataFrame into its own PostgreSQL table.
     """
     for table_name, neighborhood_df in neighborhood_dfs.items():
-        (
-            neighborhood_df.write.jdbc(
-                url=jdbc_url,
-                table=table_name,
-                mode="overwrite",
-                properties=connection_properties,
-            )
+        neighborhood_df.write.jdbc(
+            url=jdbc_url,
+            table=table_name,
+            mode="overwrite",
+            properties=connection_properties,
         )
 
 
@@ -126,8 +152,9 @@ def main() -> None:
     db_user = os.getenv("DB_USER", "joannaloja")
     db_password = os.getenv("DB_PASSWORD", "")
 
-    csv_path = "dataset/historical_purchases.csv"
-    output_dir = "output/by_neighborhood"
+    project_root = Path(__file__).resolve().parent.parent
+    csv_path = str(project_root / "dataset" / "historical_purchases.csv")
+    output_dir = str(project_root / "output" / "by_neighborhood")
 
     spark = (
         SparkSession.builder.appName("HouseSaleETLPipeline")
@@ -143,13 +170,9 @@ def main() -> None:
     }
 
     try:
-        # EXTRACT
         df = extract(spark, csv_path)
-
-        # TRANSFORM
         neighborhood_dfs = transform(df, output_dir)
 
-        # LOAD only if credentials are present
         if db_password.strip():
             load(neighborhood_dfs, jdbc_url, connection_properties)
             print("PostgreSQL load completed.")
@@ -157,7 +180,6 @@ def main() -> None:
             print("Skipping PostgreSQL load because DB_PASSWORD is not set.")
 
         print("ETL pipeline completed successfully.")
-
     finally:
         spark.stop()
 
