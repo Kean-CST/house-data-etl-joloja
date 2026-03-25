@@ -25,12 +25,7 @@ def extract(spark: SparkSession, csv_path: str) -> DataFrame:
     Extract step:
     Load the CSV file into a PySpark DataFrame.
     """
-    df = (
-        spark.read
-        .option("header", True)
-        .option("inferSchema", True)
-        .csv(csv_path)
-    )
+    df = spark.read.option("header", True).option("inferSchema", True).csv(csv_path)
     return df
 
 
@@ -67,9 +62,7 @@ def transform(df: DataFrame, output_dir: str) -> dict[str, DataFrame]:
 
     for neighborhood in neighborhoods:
         safe_name = re.sub(
-            r"[^a-zA-Z0-9_]",
-            "_",
-            str(neighborhood).strip().lower().replace(" ", "_")
+            r"[^a-zA-Z0-9_]", "_", str(neighborhood).strip().lower().replace(" ", "_")
         )
 
         neighborhood_df = df.filter(F.col(neighborhood_col) == neighborhood)
@@ -77,8 +70,7 @@ def transform(df: DataFrame, output_dir: str) -> dict[str, DataFrame]:
         # Save neighborhood data as CSV
         output_path = str(Path(output_dir) / safe_name)
         (
-            neighborhood_df.write
-            .mode("overwrite")
+            neighborhood_df.write.mode("overwrite")
             .option("header", True)
             .csv(output_path)
         )
@@ -99,8 +91,7 @@ def load(
     """
     for table_name, neighborhood_df in neighborhood_dfs.items():
         (
-            neighborhood_df.write
-            .jdbc(
+            neighborhood_df.write.jdbc(
                 url=jdbc_url,
                 table=table_name,
                 mode="overwrite",
@@ -122,8 +113,7 @@ def main() -> None:
     output_dir = "output/neighborhood_csvs"
 
     spark = (
-        SparkSession.builder
-        .appName("HouseSaleETLPipeline")
+        SparkSession.builder.appName("HouseSaleETLPipeline")
         .config("spark.jars.packages", "org.postgresql:postgresql:42.7.3")
         .getOrCreate()
     )
