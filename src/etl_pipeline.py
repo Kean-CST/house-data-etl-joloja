@@ -132,8 +132,12 @@ def main() -> None:
         # TRANSFORM
         neighborhood_dfs = transform(df, output_dir)
 
-        # LOAD
-        load(neighborhood_dfs, jdbc_url, connection_properties)
+        # LOAD only if credentials are present
+        if db_password.strip():
+            load(neighborhood_dfs, jdbc_url, connection_properties)
+            print("PostgreSQL load completed.")
+        else:
+            print("Skipping PostgreSQL load because DB_PASSWORD is not set.")
 
         print("ETL pipeline completed successfully.")
 
